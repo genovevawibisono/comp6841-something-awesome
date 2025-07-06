@@ -4,6 +4,14 @@ import datetime
 import json
 import threading
 
+import os
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import time
+
+import random
+
 from pathlib import Path
 
 LOG_DIR = Path("logs")
@@ -17,4 +25,193 @@ class Honeypot:
         self.log_file = LOG_DIR
 
     def log_activity(self, port, remote_ip, data):
-        pass
+        activity = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "remote_ip": remote_ip,
+            "port": port,
+            "data": data.decode('utf-8', errors='ignore')
+        }
+
+        with open(self.log_file) as opened_log_file:
+            json.dump(activity, opened_log_file)
+            opened_log_file.write("\n")
+
+    def handle_connection(self, client_socket, remote_ip, port):
+        service_banners = {
+            21: "220 FTP server ready.\n",
+            22: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.1\r\n",
+            80: "HTTP/1.1 200 OK\r\n Server: Apache/2.4.41 (Ubuntu)\r\n\r\n",
+            443: "HTTP/1.1 200 OK\r\n Server: Apache/2.4.41 (Ubuntu)\r\n\r\n"
+        }
+
+        try:
+            if port in service_banners:
+                client_socket.send(service_banners[port].encode())
+            
+            while True:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                self.log_activity(port, remote_ip, data)
+                client_socket.send(b"Command not recognized.\r\n")
+        except Exception as e:
+            print(f"Error in handling connection: {e}")
+        finally:
+            client_socket.close()
+
+class NetworkListener:
+    def __init__(self, bind_ip, honeypot):
+        self.bind_ip = bind_ip
+        self.honeypot = honeypot
+
+    def listen(self, port):
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.bind((self.bind_ip, port))
+            server.listen(5)
+
+            print(f"Listening on bind ip: {self.bind_ip}, port: {port}\n")
+
+            while True:
+                client, address = server.accept()
+                print(f"[*] Accepted connection from: {address[0]}:{address[1]}")
+                client_handler = threading.Thread(target=self.honeypot.handle_connection, args=(self.honeypot, client, address[0], port))
+                client_handler.start()
+        except Exception as e:
+            print(f"Error in network listener: {e}")
+    
+class Simulator:
+    def __init__(self, target_ip="127.0.0.1", intensity="medium"):
+        self.target_ip = target_ip
+        self.intensity = intensity
+        self.target_ports = [21, 22, 23, 25, 80, 443, 3306, 5432]
+        self.attack_patterns = {
+            21: [
+                "USER admin\r\n",
+                "PASS admin_password\r\n",
+                "LIST\r\n",
+                "STOR malware.exe\r\n"
+            ],
+            22: [
+                "SSH-2.0-OpenSSH_7.9\r\n",
+                "admin:admin_password\r\n",
+                "root:root\r\n"
+            ],
+            80: [
+                "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "POST /admin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+                "GET /wp-admin HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ]
+        }
+        self.intensity_settings = {
+            "low": {
+                "max_threads": 2,
+                "delay_range": (1, 3)
+            },
+            "medium": {
+                "max_threads": 5,
+                "delay_range": (0.5, 1.5)
+            },
+            "high": {
+                "max_threads": 10,
+                "delay_range": (0.25, 0.75)
+            }
+        }
+
+    def simulate_connection(self, port):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            print(f"[*] Attempting to connect to {self.target_ip}:{port}")
+
+            sock.connect((self.target_ip, sock))
+            banner = sock.recv(1024)
+            print(f"Received banner from port {port}:{banner.decode("utf-8", "ignore").strip()}")
+
+            if port in self.attack_patterns:
+                for command in self.attack_patterns[port]:
+                    print(f"Sending command to port {port}: {command.strip()}")
+                    sock.send(command.encode())
+                    try:
+                        response = sock.recv(1024)
+                        print(f"Received response: {response.decode("utf-8", "ignore").strip()}")
+                    except socket.timeout:
+                        print(f"Socket timed out in simulate connection function")
+            sock.close()
+        except ConnectionRefusedError:
+            print("Connection refused - simulate connection function")
+        except socket.timeout:
+            print("Socket timed out - simulate connection function")
+        except Exception as e:
+            print(f"Error in simulating connection: {e}\n")
+
+    def simulate_port_scan(self):
+        print("Starting simulate port scan - Simulator")
+        for port in self.target_ports:
+            self.simulate_connection(port)
+            time.sleep(random.uniform(0.1, 0.3))
+
+    def load_from_file(self, filename):
+        if not os.path.exists(filename):
+            print("File does not exist")
+            return []
+        
+        try:
+            with open(filename) as f:
+                values = [line.strip() for line in f if line.strip()]
+            return values
+        except Exception as e:
+            print(f"Error in load from file function: {e}\n")
+            return []
+
+    def simulate_brute_force(self, port):
+        common_usernames = self.load_from_file("common_usernames.txt")
+        if not common_usernames:
+            print("No common usernames loaded")
+            return
+        
+        common_passwords = self.load_from_file("common_passwords.txt")
+        if not common_passwords:
+            print("No common passwords loaded")
+            return
+        
+        print(f"Starting brute force attack on port: {port}")
+
+        for username in common_usernames:
+            for password in common_passwords:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((self.target_ip, port))
+
+                    if port == 21:
+                        sock.send(f"USER {username}\r\n".encode())
+                        sock.recv(1024)
+                        sock.send(f"PASS {password}\r\n".encode())
+                    elif port == 22:
+                        sock.send(f"{username}:{password}\r\n".encode())
+
+                    sock.close()
+                    time.sleep(random.uniform(0.1, 0.3))
+                except Exception as e:
+                    print(f"Error in brute force attack simulation: {e}")
+
+    def run_continuous_simulation(self, duration=300):
+        end_time = time.time + duration
+
+        with ThreadPoolExecutor(
+            max_workers=self.intensity_settings[self.intensity]["max_threads"]
+        ) as executor:
+            while time.time() < end_time:
+                simulation_choices = [
+                    lambda: self.simulate_port_scan(),
+                    lambda: self.simulate_brute_force(21),
+                    lambda: self.simulate_brute_force(22),
+                    lambda: self.simulate_connection(80)
+                ]
+
+                executor.submit(random.choice(simulation_choices))
+                time.sleep(*random.uniform(self.intensity_settings[self.intensity]["delay_range"]))
+
+if __name__=="__main__":
+    pass
