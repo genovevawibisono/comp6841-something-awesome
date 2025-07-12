@@ -12,7 +12,11 @@ import time
 
 import random
 
+import requests
+
 from pathlib import Path
+
+from collections import defaultdict
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -20,15 +24,19 @@ LOG_DIR.mkdir(exist_ok=True)
 class Honeypot:
     def __init__(self, bind_ip="0.0.0.0", ports=None):
         self.bind_ip = bind_ip
-        self.ports = ports or [21, 22, 80, 443]
+        self.ports = ports or [2121, 2222, 8080, 8443]
         self.active_connections = {}
         self.log_file = LOG_DIR / f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        self.failed_attempts = defaultdict()
+        self.alert_threshold = 5
 
     def log_activity(self, port, remote_ip, data):
+        geo_info = self.geoip_logging(remote_ip)
         activity = {
             "timestamp": datetime.datetime.now().isoformat(),
             "remote_ip": remote_ip,
             "port": port,
+            "geo": geo_info,
             "data": data.decode('utf-8', errors='ignore')
         }
 
@@ -38,15 +46,33 @@ class Honeypot:
 
     def handle_connection(self, client_socket, remote_ip, port):
         service_banners = {
-            21: "220 FTP server ready.\n",
-            22: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.1\r\n",
-            80: "HTTP/1.1 200 OK\r\n Server: Apache/2.4.41 (Ubuntu)\r\n\r\n",
-            443: "HTTP/1.1 200 OK\r\n Server: Apache/2.4.41 (Ubuntu)\r\n\r\n"
+            2121: [
+                "220 ProFTPD 1.3.6 Server (Debian) [::ffff:127.0.0.1]\r\n",
+                "220 (vsFTPd 3.0.3)\r\n"
+            ],
+            2222: [
+                "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5\r\n",
+                "SSH-2.0-OpenSSH_7.4\r\n",
+                "SSH-2.0-Dropbear_2022.82\r\n"
+            ],
+            8080: [
+                "HTTP/1.1 200 OK\r\nServer: Apache/2.4.41 (Ubuntu)\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nServer: nginx/1.18.0 (Ubuntu)\r\n\r\n"
+            ],
+            8443: [
+                "HTTP/1.1 200 OK\r\nServer: Apache/2.4.46 (Debian)\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nServer: nginx/1.14.2 (Debian)\r\n\r\n"
+            ]
         }
 
         try:
             if port in service_banners:
-                client_socket.send(service_banners[port].encode())
+                banner = random.choice(service_banners)
+                client_socket.send(banner.encode())
+
+            if port == 2222:
+                self.fake_ssh_shell(client_socket, remote_ip, port)
+                return
             
             while True:
                 data = client_socket.recv(1024)
@@ -58,6 +84,70 @@ class Honeypot:
             print(f"Error in handling connection: {e}")
         finally:
             client_socket.close()
+
+    def geoip_logging(self, ip):
+        try:
+            response = requests.get(f"https://ipapi.co/{ip}/json/")
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "country": data.get("country_name"),
+                    "region": data.get("region"),
+                    "city": data.get("city"),
+                    "org": data.get("org")
+                }
+        except Exception as e:
+            print(f"GeoIP lookup failed: {e}")
+        return {}
+    
+    def fake_ssh_shell(self, client_socket, remote_ip, port):
+        try:
+            client_socket.send(b"login: ")
+            username = client_socket.recv(1024).decode('utf-8', 'ignore').strip()
+
+            client_socket.send(b"Password: ")
+            password = client_socket.recv(1024).decode('utf-8', 'ignore').strip()
+
+            self.log_activity(port, remote_ip, f"SSH login attempt: {username}:{password}".encode())
+
+            client_socket.send(b"Welcome to Ubuntu 20.04.6 LTS (GNU/Linux 5.4.0-26-generic x86_64)\n")
+            client_socket.send(b"$ ")
+
+            fake_outputs = {
+                "ls": "bin  boot  dev  etc  home  lib  tmp  usr  var\n",
+                "pwd": "/home/fakeuser\n",
+                "whoami": "fakeuser\n",
+                "cat flag.txt": "Access Denied\n"
+            }
+
+            while True:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                command = data.decode('utf-8', 'ignore').strip()
+
+                self.failed_attempts[remote_ip] += 1
+
+                self.log_activity(port, remote_ip, f"Shell command: {command}".encode())
+
+                if self.failed_attempts[remote_ip] >= self.alert_threshold:
+                    self.raise_brute_force_alert(remote_ip, port)
+
+                response = fake_outputs.get(command, "Command not found\n")
+                client_socket.send(response.encode())
+                client_socket.send(b"$ ")
+        except Exception as e:
+            print(f"Error in fake SSH shell: {e}")
+
+    def raise_brute_force_alert(self, remote_ip, port):
+        alert_message = (
+            f"[ALERT] Brute-force detected from {remote_ip} on port {port} "
+            f"with {self.failed_attempts[remote_ip]} attempts."
+        )
+        print(alert_message)
+
+        with open(LOG_DIR / "alerts.log", "a") as alert_file:
+            alert_file.write(f"{datetime.datetime.now().isoformat()} - {alert_message}\n")
 
 class NetworkListener:
     def __init__(self, bind_ip, honeypot):
@@ -84,7 +174,7 @@ class Simulator:
     def __init__(self, target_ip="127.0.0.1", intensity="medium"):
         self.target_ip = target_ip
         self.intensity = intensity
-        self.target_ports = [21, 22, 23, 25, 80, 443, 3306, 5432]
+        self.target_ports = [2121, 2222, 8080, 8443, 3306, 5432]
         self.attack_patterns = {
             21: [
                 "USER admin\r\n",
@@ -205,9 +295,9 @@ class Simulator:
             while time.time() < end_time:
                 simulation_choices = [
                     lambda: self.simulate_port_scan(),
-                    lambda: self.simulate_brute_force(21),
-                    lambda: self.simulate_brute_force(22),
-                    lambda: self.simulate_connection(80)
+                    lambda: self.simulate_brute_force(2121),
+                    lambda: self.simulate_brute_force(2222),
+                    lambda: self.simulate_connection(8080)
                 ]
 
                 executor.submit(random.choice(simulation_choices))
