@@ -22,7 +22,7 @@ class Honeypot:
         self.bind_ip = bind_ip
         self.ports = ports or [21, 22, 80, 443]
         self.active_connections = {}
-        self.log_file = LOG_DIR
+        self.log_file = LOG_DIR / f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
     def log_activity(self, port, remote_ip, data):
         activity = {
@@ -32,7 +32,7 @@ class Honeypot:
             "data": data.decode('utf-8', errors='ignore')
         }
 
-        with open(self.log_file) as opened_log_file:
+        with open(self.log_file, "a") as opened_log_file:
             json.dump(activity, opened_log_file)
             opened_log_file.write("\n")
 
@@ -75,7 +75,7 @@ class NetworkListener:
             while True:
                 client, address = server.accept()
                 print(f"[*] Accepted connection from: {address[0]}:{address[1]}")
-                client_handler = threading.Thread(target=self.honeypot.handle_connection, args=(self.honeypot, client, address[0], port))
+                client_handler = threading.Thread(target=self.honeypot.handle_connection, args=(client, address[0], port))
                 client_handler.start()
         except Exception as e:
             print(f"Error in network listener: {e}")
@@ -124,9 +124,9 @@ class Simulator:
             sock.settimeout(5)
             print(f"[*] Attempting to connect to {self.target_ip}:{port}")
 
-            sock.connect((self.target_ip, sock))
+            sock.connect((self.target_ip, port))
             banner = sock.recv(1024)
-            print(f"Received banner from port {port}:{banner.decode("utf-8", "ignore").strip()}")
+            print(f"Received banner from port {port}:{banner.decode('utf-8', 'ignore').strip()}")
 
             if port in self.attack_patterns:
                 for command in self.attack_patterns[port]:
@@ -134,7 +134,7 @@ class Simulator:
                     sock.send(command.encode())
                     try:
                         response = sock.recv(1024)
-                        print(f"Received response: {response.decode("utf-8", "ignore").strip()}")
+                        print(f"Received response: {response.decode('utf-8', 'ignore').strip()}")
                     except socket.timeout:
                         print(f"Socket timed out in simulate connection function")
             sock.close()
@@ -197,7 +197,7 @@ class Simulator:
                     print(f"Error in brute force attack simulation: {e}")
 
     def run_continuous_simulation(self, duration=300):
-        end_time = time.time + duration
+        end_time = time.time() + duration
 
         with ThreadPoolExecutor(
             max_workers=self.intensity_settings[self.intensity]["max_threads"]
@@ -211,7 +211,22 @@ class Simulator:
                 ]
 
                 executor.submit(random.choice(simulation_choices))
-                time.sleep(*random.uniform(self.intensity_settings[self.intensity]["delay_range"]))
+                time.sleep(random.uniform(*self.intensity_settings[self.intensity]["delay_range"]))
 
 if __name__=="__main__":
-    pass
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["honeypot", "simulate"], required=True)
+    parser.add_argument("--ip", default="0.0.0.0")
+    parser.add_argument("--intensity", choices=["low", "medium", "high"], default="medium")
+    args = parser.parse_args()
+
+    if args.mode == "honeypot":
+        honeypot_object = Honeypot(bind_ip=args.ip)
+        network_listener_object = NetworkListener(bind_ip=args.ip, honeypot=honeypot_object)
+        for port in honeypot_object.ports:
+            threading.Thread(target=network_listener_object.listen, args=(port,), daemon=True).start()
+            while True:
+                time.sleep(1)
+    elif args.mode == "simulate":
+        simulator_object = Simulator(target_ip=args.ip, intensity=args.intensity)
+        simulator_object.run_continuous_simulation()
