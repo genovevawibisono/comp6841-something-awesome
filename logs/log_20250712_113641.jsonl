@@ -1,0 +1,2 @@
+{"timestamp": "2025-07-12T11:36:45.926433", "remote_ip": "127.0.0.1", "port": 2121, "geo": {"country": null, "region": null, "city": null, "org": null}, "data": "USER testuser\r\n"}
+{"timestamp": "2025-07-12T11:36:46.181491", "remote_ip": "127.0.0.1", "port": 2121, "geo": {"country": null, "region": null, "city": null, "org": null}, "data": "PASS testpass\r\n"}

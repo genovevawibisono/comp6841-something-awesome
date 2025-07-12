@@ -31,6 +31,7 @@ class Honeypot:
         self.alert_threshold = 5
 
     def log_activity(self, port, remote_ip, data):
+        print(f"[LOGGING] {remote_ip}:{port} -> {data}")
         geo_info = self.geoip_logging(remote_ip)
         activity = {
             "timestamp": datetime.datetime.now().isoformat(),
@@ -67,7 +68,7 @@ class Honeypot:
 
         try:
             if port in service_banners:
-                banner = random.choice(service_banners)
+                banner = random.choice(service_banners[port])
                 client_socket.send(banner.encode())
 
             if port == 2222:
@@ -176,18 +177,18 @@ class Simulator:
         self.intensity = intensity
         self.target_ports = [2121, 2222, 8080, 8443, 3306, 5432]
         self.attack_patterns = {
-            21: [
+            2121: [
                 "USER admin\r\n",
                 "PASS admin_password\r\n",
                 "LIST\r\n",
                 "STOR malware.exe\r\n"
             ],
-            22: [
+            2222: [
                 "SSH-2.0-OpenSSH_7.9\r\n",
                 "admin:admin_password\r\n",
                 "root:root\r\n"
             ],
-            80: [
+            8080: [
                 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
                 "POST /admin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
                 "GET /wp-admin HTTP/1.1\r\nHost: localhost\r\n\r\n"
